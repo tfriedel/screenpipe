@@ -50,9 +50,18 @@ Use `#` for Python, `//` for Rust/TS/JS/Swift. Keep it as the first comment in t
   ```bash
   rm -rf apps/screenpipe-app-tauri/src-tauri/target/debug/build/whisper-rs-sys-*
   ```
-- For full app builds, also need ONNX Runtime in two locations (see `.github/workflows/release-app.yml` lines ~704-720):
-  - `src-tauri/onnxruntime-win-x64-1.19.2/` → Tauri resources
-  - `ort-system-lib/` → `ORT_LIB_LOCATION` for ort-sys
+- For release builds (`cargo build --release`), also set:
+  ```bash
+  export ORT_STRATEGY=system
+  export ORT_LIB_LOCATION="S:/projects/screenpipe/ort-system-lib"
+  export KNF_STATIC_CRT=1
+  ```
+  - `ORT_STRATEGY=system` + `ORT_LIB_LOCATION` — uses pre-built ONNX Runtime DLLs instead of building from source, avoiding RuntimeLibrary (MD vs MT) CRT mismatch with knf-rs-sys
+  - `KNF_STATIC_CRT=1` — ensures knf-rs-sys uses static CRT matching `.cargo/config.toml` rustflags
+  - ONNX Runtime must exist in two locations (see `.github/workflows/release-app.yml` lines ~704-720):
+    - `src-tauri/onnxruntime-win-x64-1.19.2/` → Tauri resources
+    - `ort-system-lib/` → `ORT_LIB_LOCATION` for ort-sys
+  - The Tauri app is excluded from the workspace; build from `apps/screenpipe-app-tauri/src-tauri/`
 
 ## git usage
 - make sure to understand there is always bunch of other agents working on the same codebase in parallel, never delete local code or use git reset or such
