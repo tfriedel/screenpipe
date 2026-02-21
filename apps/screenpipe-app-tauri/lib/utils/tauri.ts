@@ -521,6 +521,72 @@ async piNewSession() : Promise<Result<null, string>> {
 }
 },
 /**
+ * Check if Claude Agent SDK is available
+ */
+async claudeAgentCheck() : Promise<Result<ClaudeAgentCheckResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("claude_agent_check") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Start the Claude Agent bridge process
+ */
+async claudeAgentStart() : Promise<Result<ClaudeAgentInfo, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("claude_agent_start") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Stop the Claude Agent bridge process
+ */
+async claudeAgentStop() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("claude_agent_stop") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Send a prompt to Claude Agent
+ */
+async claudeAgentPrompt(message: string, model: string | null) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("claude_agent_prompt", { message, model }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Abort current Claude Agent operation
+ */
+async claudeAgentAbort() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("claude_agent_abort") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Start a new Claude Agent session (clears conversation history)
+ */
+async claudeAgentNewSession() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("claude_agent_new_session") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Save obsidian settings to persistent store (called when settings change)
  */
 async obsidianSaveSettings(settings: ObsidianSyncSettings) : Promise<Result<null, string>> {
@@ -813,8 +879,10 @@ async getCachedSuggestions() : Promise<Result<CachedSuggestions, string>> {
 /** user-defined types **/
 
 export type AIPreset = { id: string; prompt: string; provider: AIProviderType; url?: string; model?: string; defaultPreset: boolean; apiKey: string | null; maxContextChars: number }
-export type AIProviderType = "openai" | "native-ollama" | "custom" | "screenpipe-cloud" | "pi"
+export type AIProviderType = "openai" | "native-ollama" | "custom" | "screenpipe-cloud" | "pi" | "claude-agent-sdk"
 export type AudioDeviceInfo = { name: string; isDefault: boolean }
+export type ClaudeAgentCheckResult = { available: boolean; error: string | null }
+export type ClaudeAgentInfo = { running: boolean; pid: number | null }
 export type CachedSuggestions = { suggestions: Suggestion[]; generatedAt: string; mode: string; aiGenerated: boolean; tags: string[] }
 export type CalendarEventItem = { id: string; title: string; 
 /**

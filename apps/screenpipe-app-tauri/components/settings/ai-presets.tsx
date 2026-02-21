@@ -81,7 +81,7 @@ const formatPresetName = (name: string): string => {
 };
 
 export interface AIProviderCardProps {
-  type: "openai" | "native-ollama" | "custom" | "embedded" | "pi";
+  type: "openai" | "native-ollama" | "custom" | "embedded" | "pi" | "claude-agent-sdk";
   title: string;
   description: string;
   imageSrc: string;
@@ -154,11 +154,13 @@ const AISection = ({
   setDialog,
   isDuplicating,
   piAvailable,
+  claudeAgentAvailable,
 }: {
   preset?: AIPreset;
   setDialog: (value: boolean) => void;
   isDuplicating?: boolean;
   piAvailable?: boolean;
+  claudeAgentAvailable?: boolean;
 }) => {
   const { settings, updateSettings } = useSettings();
   const [settingsPreset, setSettingsPreset] = useState<
@@ -373,6 +375,10 @@ const AISection = ({
         newUrl = ""; // Pi uses RPC mode, not HTTP
         newModel = "claude-haiku-4-5";
         break;
+      case "claude-agent-sdk":
+        newUrl = ""; // Uses local Claude Agent SDK, no HTTP
+        newModel = "claude-sonnet-4-5-20250514";
+        break;
     }
 
     updateSettingsPreset({
@@ -474,6 +480,16 @@ const AISection = ({
           break;
         }
 
+        case "claude-agent-sdk": {
+          const claudeModels: AIModel[] = [
+            { id: "claude-sonnet-4-5-20250514", name: "Sonnet 4.5 (balanced)", provider: "claude-agent-sdk" },
+            { id: "claude-opus-4-6-20250515", name: "Opus 4.6 (powerful)", provider: "claude-agent-sdk" },
+            { id: "claude-haiku-4-5-20251001", name: "Haiku 4.5 (fast)", provider: "claude-agent-sdk" },
+          ];
+          setModels(claudeModels);
+          break;
+        }
+
         default:
           setModels([]);
       }
@@ -566,6 +582,17 @@ const AISection = ({
               onClick={() => handleAiProviderChange("pi")}
               disabled={!settings.user?.token}
               warningText={!settings.user?.token ? "Login required" : undefined}
+            />
+          )}
+
+          {claudeAgentAvailable && (
+            <AIProviderCard
+              type="claude-agent-sdk"
+              title="Claude Agent"
+              description="Uses your Claude Max subscription via Agent SDK"
+              imageSrc="/images/custom.png"
+              selected={settingsPreset?.provider === "claude-agent-sdk"}
+              onClick={() => handleAiProviderChange("claude-agent-sdk")}
             />
           )}
 
@@ -851,6 +878,7 @@ export const AIPresets = () => {
   );
   const [isDuplicating, setIsDuplicating] = useState(false);
   const [piAvailable, setPiAvailable] = useState(false);
+  const [claudeAgentAvailable, setClaudeAgentAvailable] = useState(false);
 
   // Check Pi availability (installed at app startup by Rust background thread)
   useEffect(() => {
@@ -863,6 +891,19 @@ export const AIPresets = () => {
     checkPi();
     // Re-check periodically in case background install finishes
     const interval = setInterval(checkPi, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // Check Claude Agent SDK availability
+  useEffect(() => {
+    const checkClaudeAgent = async () => {
+      const result = await commands.claudeAgentCheck();
+      if (result.status === "ok" && result.data.available) {
+        setClaudeAgentAvailable(true);
+      }
+    };
+    checkClaudeAgent();
+    const interval = setInterval(checkClaudeAgent, 10000);
     return () => clearInterval(interval);
   }, []);
 
@@ -880,6 +921,7 @@ export const AIPresets = () => {
         preset={selectedPreset}
         isDuplicating={isDuplicating}
         piAvailable={piAvailable}
+        claudeAgentAvailable={claudeAgentAvailable}
       />
     );
 
