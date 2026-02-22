@@ -291,11 +291,36 @@ fn parse_where_output(stdout: &str) -> Option<String> {
     None
 }
 
-/// Find pi executable
+/// Find pi executable.
+///
+/// On Windows, prefer the JS entry point (`dist/cli.js`) over the bun-generated
+/// `pi.exe` shim. The shim crashes when the bundled bun tries to parse the PE
+/// binary as JavaScript source code.
 fn find_pi_executable() -> Option<String> {
     let home = dirs::home_dir()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
+
+    #[cfg(windows)]
+    {
+        let js_paths = vec![
+            format!(
+                "{}\\.bun\\install\\global\\node_modules\\@mariozechner\\pi-coding-agent\\dist\\cli.js",
+                home
+            ),
+            format!(
+                "{}\\AppData\\Local\\bun\\install\\global\\node_modules\\@mariozechner\\pi-coding-agent\\dist\\cli.js",
+                home
+            ),
+        ];
+
+        for path in &js_paths {
+            if std::path::Path::new(path).exists() {
+                info!("Found Pi JS entry point (bypassing shim): {}", path);
+                return Some(path.clone());
+            }
+        }
+    }
 
     #[cfg(unix)]
     let paths = vec![
