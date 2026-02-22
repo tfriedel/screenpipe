@@ -79,6 +79,8 @@ async function handlePrompt(message: string) {
       prompt: message,
       options: {
         model: currentModel,
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
       },
       signal: abortController.signal,
     };
@@ -194,7 +196,7 @@ async function collectText(
   let fullText = "";
   for await (const msg of query({
     prompt,
-    options: { model },
+    options: { model, permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true },
     signal,
   })) {
     if (msg.type === "assistant" && msg.message?.content) {
@@ -269,7 +271,7 @@ function startHttpServer() {
                   try {
                     for await (const msg of query({
                       prompt,
-                      options: { model },
+                      options: { model, permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true },
                     })) {
                       if (
                         msg.type === "assistant" &&
