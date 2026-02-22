@@ -252,9 +252,9 @@ impl TreeWalkerPlatform for MacosTreeWalker {
         walk_element(window, 0, &mut state);
 
         let text_content = state.text_buffer;
-        if text_content.is_empty() {
-            return Ok(None);
-        }
+        // Don't bail on empty text — we still need the app_name and window_name
+        // for frame metadata. Chrome/Electron apps often return empty accessibility
+        // text but the app/window detection above already succeeded.
 
         // Truncate if needed
         let text_content = if text_content.len() > self.config.max_text_length {

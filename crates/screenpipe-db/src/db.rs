@@ -65,7 +65,7 @@ pub struct DeleteTimeRangeResult {
 pub struct ImmediateTx {
     conn: Option<PoolConnection<Sqlite>>,
     committed: bool,
-    _write_permit: OwnedSemaphorePermit,
+    _write_permit: Option<OwnedSemaphorePermit>,
 }
 
 impl ImmediateTx {
@@ -98,27 +98,23 @@ impl Drop for ImmediateTx {
     fn drop(&mut self) {
         if !self.committed {
             if let Some(mut conn) = self.conn.take() {
-                // Roll back the open transaction and return the connection to the pool.
-                //
-                // Previous approach detached (leaked) the connection to avoid async
-                // issues, but that slowly exhausted the pool over time.
-                //
-                // We spawn a task to rollback asynchronously. The connection is moved
-                // into the task, so if rollback succeeds, the clean connection is
-                // returned to the pool when dropped. If rollback fails, we detach.
+                // Move the write permit into the rollback task so the semaphore
+                // is NOT released until the ROLLBACK actually completes and frees
+                // the SQLite write lock. Without this, the next writer acquires
+                // the semaphore while the old connection still holds the SQLite
+                // write lock, causing BEGIN IMMEDIATE to block for 30-62s.
+                let permit = self._write_permit.take();
                 warn!("ImmediateTx dropped without commit — scheduling rollback");
-                // Rollback and return the connection to the pool. We spawn an async
-                // task because Drop is synchronous. The connection is moved into the
-                // task; if rollback succeeds, it returns to the pool when dropped.
                 tokio::spawn(async move {
                     if let Err(e) = sqlx::query("ROLLBACK").execute(&mut *conn).await {
                         error!("failed to rollback on drop: {}", e);
                         let _raw = conn.detach();
                     }
+                    // permit is dropped here AFTER rollback, releasing the semaphore
+                    drop(permit);
                 });
             }
         }
-        // _write_permit is dropped here, releasing the semaphore for the next writer
     }
 }
 
@@ -386,24 +382,45 @@ impl DatabaseManager {
     /// if not committed (preventing dirty connections from poisoning the pool).
     pub async fn begin_immediate_with_retry(&self) -> Result<ImmediateTx, sqlx::Error> {
         // Acquire the write semaphore first — this is where serialization happens.
-        // Only one task can pass this point at a time.
-        let permit = Arc::clone(&self.write_semaphore)
-            .acquire_owned()
-            .await
-            .map_err(|_| sqlx::Error::PoolClosed)?;
+        // Only one task can pass this point at a time. Use a timeout so captures
+        // don't block indefinitely when FTS holds the semaphore waiting for a pool
+        // connection (which itself may be blocked by streaming queries).
+        let permit = match tokio::time::timeout(
+            Duration::from_secs(5),
+            Arc::clone(&self.write_semaphore).acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) => return Err(sqlx::Error::PoolClosed),
+            Err(_) => {
+                return Err(sqlx::Error::PoolTimedOut);
+            }
+        };
 
         // With the semaphore held, BEGIN IMMEDIATE should succeed immediately
         // since no other writer can be active. Retry only for edge cases
         // (e.g., checkpoint in progress).
         let max_retries = 3;
         for attempt in 1..=max_retries {
-            let mut conn = self.pool.acquire().await?;
+            // Short timeout on pool.acquire — with semaphore held, we don't want
+            // to block for 30s waiting for a pool connection.
+            let mut conn = match tokio::time::timeout(
+                Duration::from_secs(3),
+                self.pool.acquire(),
+            )
+            .await
+            {
+                Ok(Ok(conn)) => conn,
+                Ok(Err(e)) => return Err(e),
+                Err(_) => return Err(sqlx::Error::PoolTimedOut),
+            };
             match sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await {
                 Ok(_) => {
                     return Ok(ImmediateTx {
                         conn: Some(conn),
                         committed: false,
-                        _write_permit: permit,
+                        _write_permit: Some(permit),
                     })
                 }
                 Err(e) if attempt < max_retries && Self::is_busy_error(&e) => {
@@ -423,18 +440,40 @@ impl DatabaseManager {
     /// Low-priority version of `begin_immediate_with_retry` for background tasks
     /// like the FTS indexer. Returns `None` if the write semaphore is already held,
     /// so the caller can skip and retry later instead of blocking real-time captures.
+    ///
+    /// IMPORTANT: pool.acquire has a short timeout to prevent holding the write
+    /// semaphore while waiting for a pool connection. Without this, FTS can hold
+    /// the semaphore for up to 30s (pool acquire_timeout), starving captures.
     pub async fn try_begin_immediate(&self) -> Result<Option<ImmediateTx>, sqlx::Error> {
         let permit = match Arc::clone(&self.write_semaphore).try_acquire_owned() {
             Ok(permit) => permit,
             Err(_) => return Ok(None), // Someone else is writing — yield
         };
 
-        let mut conn = self.pool.acquire().await?;
+        // Short timeout on pool.acquire — don't hold the write semaphore while
+        // waiting for a pool connection. If the pool is saturated (streaming queries),
+        // release the semaphore immediately so captures aren't blocked.
+        let conn = match tokio::time::timeout(
+            Duration::from_millis(500),
+            self.pool.acquire(),
+        )
+        .await
+        {
+            Ok(Ok(conn)) => conn,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                // Pool busy — drop semaphore permit so captures can proceed
+                drop(permit);
+                return Ok(None);
+            }
+        };
+
+        let mut conn = conn;
         match sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await {
             Ok(_) => Ok(Some(ImmediateTx {
                 conn: Some(conn),
                 committed: false,
-                _write_permit: permit,
+                _write_permit: Some(permit),
             })),
             Err(e) if Self::is_busy_error(&e) => {
                 drop(conn);
@@ -1035,6 +1074,7 @@ impl DatabaseManager {
     /// The snapshot JPEG path is stored directly on the frame row.
     /// Returns the new frame id.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn insert_snapshot_frame(
         &self,
         device_name: &str,
@@ -1050,6 +1090,33 @@ impl DatabaseManager {
         accessibility_tree_json: Option<&str>,
         content_hash: Option<i64>,
         simhash: Option<i64>,
+    ) -> Result<i64, sqlx::Error> {
+        self.insert_snapshot_frame_with_ocr(
+            device_name, timestamp, snapshot_path, app_name, window_name,
+            browser_url, focused, capture_trigger, accessibility_text, text_source,
+            accessibility_tree_json, content_hash, simhash, None,
+        ).await
+    }
+
+    /// Insert a snapshot frame AND optional OCR text positions in a single transaction.
+    /// This avoids opening two separate transactions per capture which doubles pool pressure.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_snapshot_frame_with_ocr(
+        &self,
+        device_name: &str,
+        timestamp: DateTime<Utc>,
+        snapshot_path: &str,
+        app_name: Option<&str>,
+        window_name: Option<&str>,
+        browser_url: Option<&str>,
+        focused: bool,
+        capture_trigger: Option<&str>,
+        accessibility_text: Option<&str>,
+        text_source: Option<&str>,
+        accessibility_tree_json: Option<&str>,
+        content_hash: Option<i64>,
+        simhash: Option<i64>,
+        ocr_data: Option<(&str, &str, &str)>, // (text, text_json, ocr_engine)
     ) -> Result<i64, sqlx::Error> {
         let mut tx = self.begin_immediate_with_retry().await?;
 
@@ -1084,8 +1151,23 @@ impl DatabaseManager {
         .await?
         .last_insert_rowid();
 
+        // Insert OCR text positions in the same transaction (no extra connection needed)
+        if let Some((text, text_json, ocr_engine)) = ocr_data {
+            let text_length = text.len() as i64;
+            sqlx::query(
+                "INSERT INTO ocr_text (frame_id, text, text_json, ocr_engine, text_length) VALUES (?1, ?2, ?3, ?4, ?5)",
+            )
+            .bind(id)
+            .bind(text)
+            .bind(text_json)
+            .bind(ocr_engine)
+            .bind(text_length)
+            .execute(&mut **tx.conn())
+            .await?;
+        }
+
         tx.commit().await?;
-        debug!("insert_snapshot_frame: id={}, trigger={:?}", id, capture_trigger);
+        debug!("insert_snapshot_frame: id={}, trigger={:?}, has_ocr={}", id, capture_trigger, ocr_data.is_some());
         Ok(id)
     }
 

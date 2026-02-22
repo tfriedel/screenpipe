@@ -144,6 +144,10 @@ pub async fn start_embedded_server(
     // Create shared pipeline metrics (used by recording + health endpoint + PostHog)
     let vision_metrics = Arc::new(screenpipe_vision::PipelineMetrics::new());
 
+    // Capture trigger sender — set by VisionManager when vision is enabled.
+    // Passed to start_ui_recording so UI events (clicks, app switches) trigger captures.
+    let mut capture_trigger_tx: Option<screenpipe_server::event_driven_capture::TriggerSender> = None;
+
     // Start vision recording (event-driven capture via VisionManager)
     if !config.disable_vision {
         let db_clone = db.clone();
@@ -159,6 +163,10 @@ pub async fn start_embedded_server(
             db_clone,
             vision_handle.clone(),
         ));
+
+        // Get the broadcast trigger sender BEFORE moving VisionManager into the
+        // spawned task. Passed to start_ui_recording so UI events trigger captures.
+        capture_trigger_tx = Some(vision_manager.trigger_sender());
 
         let vm_clone = vision_manager.clone();
         let shutdown_rx = shutdown_tx_clone.subscribe();
@@ -209,7 +217,7 @@ pub async fn start_embedded_server(
         let ui_config = config.to_ui_recorder_config();
         let db_clone = db.clone();
         tokio::spawn(async move {
-            match start_ui_recording(db_clone, ui_config, None).await {
+            match start_ui_recording(db_clone, ui_config, capture_trigger_tx).await {
                 Ok(handle) => {
                     info!("UI event recording started successfully");
                     // Keep the handle alive - don't drop it or UI recording stops

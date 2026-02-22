@@ -646,7 +646,7 @@ impl UiRecorderHandle {
 pub async fn start_ui_recording(
     _db: std::sync::Arc<screenpipe_db::DatabaseManager>,
     _config: UiRecorderConfig,
-    _capture_trigger_tx: Option<crate::event_driven_capture::TriggerSender>,
+    _capture_trigger_tx: Option<tokio::sync::broadcast::Sender<crate::event_driven_capture::CaptureTrigger>>,
 ) -> anyhow::Result<UiRecorderHandle> {
     Ok(UiRecorderHandle)
 }
