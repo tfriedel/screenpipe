@@ -79,9 +79,6 @@ async function handlePrompt(message: string) {
       prompt: message,
       options: {
         model: currentModel,
-        // Chat-only mode: no tools
-        allowedTools: [],
-        maxTurns: 1,
       },
       signal: abortController.signal,
     };
@@ -197,7 +194,7 @@ async function collectText(
   let fullText = "";
   for await (const msg of query({
     prompt,
-    options: { model, allowedTools: [], maxTurns: 1 },
+    options: { model },
     signal,
   })) {
     if (msg.type === "assistant" && msg.message?.content) {
@@ -252,7 +249,15 @@ function startHttpServer() {
             const messages = body.messages || [];
             const stream = body.stream ?? false;
 
+            // Debug: log what Pi sends us
+            console.error(`[bridge-http] POST /v1/chat/completions model=${model} stream=${stream} messages=${messages.length}`);
+            for (const m of messages) {
+              const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+              console.error(`[bridge-http]   ${m.role}: ${content.slice(0, 200)}${content.length > 200 ? "..." : ""}`);
+            }
+
             const prompt = buildPromptFromMessages(messages);
+            console.error(`[bridge-http] prompt length: ${prompt.length} chars`);
             const completionId = `chatcmpl-${Date.now()}`;
             const created = Math.floor(Date.now() / 1000);
 
@@ -264,7 +269,7 @@ function startHttpServer() {
                   try {
                     for await (const msg of query({
                       prompt,
-                      options: { model, allowedTools: [], maxTurns: 1 },
+                      options: { model },
                     })) {
                       if (
                         msg.type === "assistant" &&
