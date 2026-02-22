@@ -257,6 +257,7 @@ fn resolve_preset(pipes_dir: &Path, preset_id: &str) -> Option<ResolvedPreset> {
             "native-ollama" => Some("ollama"),
             "openai" => Some("openai"),
             "custom" => Some("custom"), // custom uses openai-compatible API at a user-specified URL
+            "claude-agent-sdk" => Some("custom"), // routes through local HTTP bridge on port 39281
             _ => None,
         })
         .map(|s| s.to_string());

@@ -1579,6 +1579,9 @@ async fn main() {
             // Install Pi coding agent in background (fire-and-forget, never crashes)
             crate::pi::ensure_pi_installed_background();
 
+            // Auto-start Claude Agent bridge if SDK is available (provides HTTP API for pipes)
+            crate::claude_agent::ensure_claude_agent_bridge_running_background(app_handle.clone());
+
             info!("Local data directory: {}", base_dir.display());
 
             // PostHog analytics setup

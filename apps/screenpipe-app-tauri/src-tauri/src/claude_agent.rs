@@ -7,6 +7,9 @@
 //! Manages a TypeScript bridge sidecar that uses the Claude Agent SDK
 //! for chat. Emits Pi-compatible events (`pi_event`) so the existing
 //! frontend pipeline is fully reused.
+//!
+//! The bridge also serves an OpenAI-compatible HTTP API on port 39281
+//! so that pipes can use it as a standard provider endpoint.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -15,6 +18,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Arc;
 use tauri::Emitter;
+use tauri::Manager;
 use tauri::{AppHandle, State};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
@@ -22,10 +26,10 @@ use tracing::{debug, error, info, warn};
 /// The bridge script is embedded at compile time from assets/
 const BRIDGE_SCRIPT: &str = include_str!("../assets/claude-agent-bridge.ts");
 
-/// Idle timeout before auto-stopping the bridge process
-const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300); // 5 min
+/// Idle timeout before auto-stopping the bridge process (30 min for HTTP server use)
+const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
 /// How often the watchdog checks for idle
-const WATCHDOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+const WATCHDOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 // ---------------------------------------------------------------------------
 // State types
@@ -228,70 +232,17 @@ fn write_bridge_script() -> Result<String, String> {
 }
 
 // ---------------------------------------------------------------------------
-// Tauri commands
+// Core start logic (shared between Tauri command and auto-start)
 // ---------------------------------------------------------------------------
 
-/// Check if Claude Agent SDK is available (bun + SDK installed)
-#[tauri::command]
-#[specta::specta]
-pub async fn claude_agent_check() -> Result<ClaudeAgentCheckResult, String> {
-    let bun = match find_bun_executable() {
-        Some(b) => b,
-        None => {
-            return Ok(ClaudeAgentCheckResult {
-                available: false,
-                error: Some("bun not found. Install from https://bun.sh".to_string()),
-            })
-        }
-    };
-
-    // Check if the SDK is importable
-    let mut cmd = Command::new(&bun);
-    cmd.args([
-        "eval",
-        "import('@anthropic-ai/claude-agent-sdk').then(() => console.log('ok')).catch(e => { console.error(e.message); process.exit(1) })",
-    ]);
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    match cmd.output() {
-        Ok(output) => {
-            if output.status.success() {
-                Ok(ClaudeAgentCheckResult {
-                    available: true,
-                    error: None,
-                })
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-                Ok(ClaudeAgentCheckResult {
-                    available: false,
-                    error: Some(format!(
-                        "Claude Agent SDK not found. Install with: bun add -g @anthropic-ai/claude-agent-sdk\n{}",
-                        stderr
-                    )),
-                })
-            }
-        }
-        Err(e) => Ok(ClaudeAgentCheckResult {
-            available: false,
-            error: Some(format!("Failed to check SDK: {}", e)),
-        }),
-    }
-}
-
-/// Start the Claude Agent bridge process
-#[tauri::command]
-#[specta::specta]
-pub async fn claude_agent_start(
+/// Start the Claude Agent bridge process.
+/// This is the core logic used by both the `claude_agent_start` Tauri command
+/// and the auto-start at app startup.
+pub async fn start_bridge(
     app: AppHandle,
-    state: State<'_, ClaudeAgentState>,
+    state_arc: Arc<Mutex<Option<ClaudeAgentManager>>>,
 ) -> Result<ClaudeAgentInfo, String> {
-    let mut manager_guard = state.0.lock().await;
+    let mut manager_guard = state_arc.lock().await;
 
     // If already running, return current state
     if let Some(m) = manager_guard.as_mut() {
@@ -456,7 +407,7 @@ pub async fn claude_agent_start(
 
     // Spawn idle watchdog
     {
-        let state_clone = state.0.clone();
+        let state_clone = state_arc.clone();
         let app_handle_wd = app.clone();
         let watchdog = tokio::spawn(async move {
             loop {
@@ -485,7 +436,7 @@ pub async fn claude_agent_start(
             debug!("Claude agent watchdog task exiting");
         });
 
-        let mut guard = state.0.lock().await;
+        let mut guard = state_arc.lock().await;
         if let Some(m) = guard.as_mut() {
             m.watchdog_handle = Some(watchdog);
         }
@@ -494,7 +445,7 @@ pub async fn claude_agent_start(
     // Wait for bridge to initialize
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     {
-        let mut manager_guard = state.0.lock().await;
+        let mut manager_guard = state_arc.lock().await;
         if let Some(m) = manager_guard.as_mut() {
             if let Some(ref mut child) = m.child {
                 match child.try_wait() {
@@ -518,6 +469,74 @@ pub async fn claude_agent_start(
     }
 
     Ok(snapshot)
+}
+
+// ---------------------------------------------------------------------------
+// Tauri commands
+// ---------------------------------------------------------------------------
+
+/// Check if Claude Agent SDK is available (bun + SDK installed)
+#[tauri::command]
+#[specta::specta]
+pub async fn claude_agent_check() -> Result<ClaudeAgentCheckResult, String> {
+    let bun = match find_bun_executable() {
+        Some(b) => b,
+        None => {
+            return Ok(ClaudeAgentCheckResult {
+                available: false,
+                error: Some("bun not found. Install from https://bun.sh".to_string()),
+            })
+        }
+    };
+
+    // Check if the SDK is importable (run from temp dir to avoid local node_modules interference)
+    let mut cmd = Command::new(&bun);
+    cmd.args([
+        "-e",
+        "import('@anthropic-ai/claude-agent-sdk').then(() => console.log('ok')).catch(e => { console.error(e.message); process.exit(1) })",
+    ]);
+    cmd.current_dir(std::env::temp_dir());
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    match cmd.output() {
+        Ok(output) => {
+            if output.status.success() {
+                Ok(ClaudeAgentCheckResult {
+                    available: true,
+                    error: None,
+                })
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                Ok(ClaudeAgentCheckResult {
+                    available: false,
+                    error: Some(format!(
+                        "Claude Agent SDK not found. Install with: bun add -g @anthropic-ai/claude-agent-sdk\n{}",
+                        stderr
+                    )),
+                })
+            }
+        }
+        Err(e) => Ok(ClaudeAgentCheckResult {
+            available: false,
+            error: Some(format!("Failed to check SDK: {}", e)),
+        }),
+    }
+}
+
+/// Start the Claude Agent bridge process
+#[tauri::command]
+#[specta::specta]
+pub async fn claude_agent_start(
+    app: AppHandle,
+    state: State<'_, ClaudeAgentState>,
+) -> Result<ClaudeAgentInfo, String> {
+    start_bridge(app, state.0.clone()).await
 }
 
 /// Stop the Claude Agent bridge
@@ -593,4 +612,39 @@ pub async fn cleanup_claude_agent(state: &ClaudeAgentState) {
     if let Some(m) = manager.as_mut() {
         m.stop();
     }
+}
+
+/// Auto-start the Claude Agent bridge in the background if the SDK is available.
+/// Call this from the app setup hook.
+pub fn ensure_claude_agent_bridge_running_background(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        // Wait for app to settle
+        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+
+        // Check SDK availability
+        match claude_agent_check().await {
+            Ok(result) if result.available => {
+                info!("Claude Agent SDK available, auto-starting bridge...");
+                if let Some(state) = app.try_state::<ClaudeAgentState>() {
+                    match start_bridge(app.clone(), state.0.clone()).await {
+                        Ok(info) => {
+                            info!("Claude Agent bridge auto-started: running={}, pid={:?}", info.running, info.pid);
+                        }
+                        Err(e) => {
+                            warn!("Failed to auto-start Claude Agent bridge: {}", e);
+                        }
+                    }
+                }
+            }
+            Ok(result) => {
+                info!(
+                    "Claude Agent SDK not available, skipping auto-start: {:?}",
+                    result.error
+                );
+            }
+            Err(e) => {
+                warn!("Failed to check Claude Agent SDK: {}", e);
+            }
+        }
+    });
 }

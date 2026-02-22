@@ -376,8 +376,8 @@ const AISection = ({
         newModel = "claude-haiku-4-5";
         break;
       case "claude-agent-sdk":
-        newUrl = ""; // Uses local Claude Agent SDK, no HTTP
-        newModel = "claude-sonnet-4-5-20250514";
+        newUrl = "http://localhost:39281/v1";
+        newModel = "claude-sonnet-4-6-20250514";
         break;
     }
 
@@ -482,7 +482,8 @@ const AISection = ({
 
         case "claude-agent-sdk": {
           const claudeModels: AIModel[] = [
-            { id: "claude-sonnet-4-5-20250514", name: "Sonnet 4.5 (balanced)", provider: "claude-agent-sdk" },
+            { id: "claude-sonnet-4-6-20250514", name: "Sonnet 4.6 (latest)", provider: "claude-agent-sdk" },
+            { id: "claude-sonnet-4-5-20250514", name: "Sonnet 4.5", provider: "claude-agent-sdk" },
             { id: "claude-opus-4-6-20250515", name: "Opus 4.6 (powerful)", provider: "claude-agent-sdk" },
             { id: "claude-haiku-4-5-20251001", name: "Haiku 4.5 (fast)", provider: "claude-agent-sdk" },
           ];
