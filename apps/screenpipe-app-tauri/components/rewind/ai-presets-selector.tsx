@@ -137,6 +137,7 @@ export function AIProviderConfig({
   const [idError, setIdError] = useState<string | null>(null);
   const [showApiKey, setShowApiKey] = useState(false);
   const [piAvailable, setPiAvailable] = useState(false);
+  const [claudeAgentAvailable, setClaudeAgentAvailable] = useState(false);
 
   // Check Pi availability (installed at app startup by Rust background thread)
   useEffect(() => {
@@ -154,6 +155,21 @@ export function AIProviderConfig({
     // Re-check periodically in case background install finishes
     const interval = setInterval(checkPi, 5000);
     return () => clearInterval(interval);
+  }, []);
+
+  // Check Claude Agent SDK availability
+  useEffect(() => {
+    const checkClaudeAgent = async () => {
+      try {
+        const result = await commands.claudeAgentCheck();
+        if (result.status === "ok" && result.data.available) {
+          setClaudeAgentAvailable(true);
+        }
+      } catch (e) {
+        console.error("Failed to check claude agent:", e);
+      }
+    };
+    checkClaudeAgent();
   }, []);
   const [formData, setFormData] = useState<AIPreset>({
     provider: defaultPreset?.provider || "openai",
@@ -327,7 +343,8 @@ export function AIProviderConfig({
 
         <div className={cn(
           "grid gap-1",
-          piAvailable ? "grid-cols-4" : "grid-cols-3"
+          claudeAgentAvailable && piAvailable ? "grid-cols-5" :
+          (claudeAgentAvailable || piAvailable) ? "grid-cols-4" : "grid-cols-3"
         )}>
           <Button
             type="button"
@@ -396,6 +413,26 @@ export function AIProviderConfig({
             >
               <Icons.terminal className="h-3 w-3" />
               <span>pi</span>
+            </Button>
+          )}
+
+          {claudeAgentAvailable && (
+            <Button
+              type="button"
+              variant={selectedProvider === "claude-agent-sdk" ? "default" : "outline"}
+              className="flex h-7 items-center justify-center gap-1 text-[10px] px-2"
+              onClick={() => {
+                setSelectedProvider("claude-agent-sdk");
+                setFormData({
+                  ...formData,
+                  provider: "claude-agent-sdk",
+                  url: "http://localhost:39281/v1",
+                  model: "claude-sonnet-4-6-20250514",
+                });
+              }}
+            >
+              <Icons.terminal className="h-3 w-3" />
+              <span>claude</span>
             </Button>
           )}
         </div>
@@ -616,6 +653,31 @@ export function AIProviderConfig({
                 </SelectItem>
               </SelectContent>
             </Select>
+          </div>
+        )}
+
+        {selectedProvider === "claude-agent-sdk" && (
+          <div className="space-y-0.5">
+            <Label htmlFor="model" className="text-xs">model</Label>
+            <Select
+              value={formData.model}
+              onValueChange={(value) =>
+                setFormData({ ...formData, model: value })
+              }
+            >
+              <SelectTrigger className="h-7 text-xs">
+                <SelectValue placeholder="select model" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="claude-sonnet-4-6-20250514">Sonnet 4.6 (latest)</SelectItem>
+                <SelectItem value="claude-sonnet-4-5-20250514">Sonnet 4.5</SelectItem>
+                <SelectItem value="claude-opus-4-6-20250515">Opus 4.6 (powerful)</SelectItem>
+                <SelectItem value="claude-haiku-4-5-20251001">Haiku 4.5 (fast)</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-[10px] text-muted-foreground">
+              uses your Claude Max subscription via Agent SDK
+            </p>
           </div>
         )}
 

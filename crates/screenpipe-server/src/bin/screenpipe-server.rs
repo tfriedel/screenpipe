@@ -664,7 +664,7 @@ async fn main() -> anyhow::Result<()> {
     let vision_metrics = Arc::new(screenpipe_vision::PipelineMetrics::new());
 
     // Create VisionManager for event-driven capture on all monitors
-    let handle = if !config.disable_vision {
+    let (handle, capture_trigger_tx) = if !config.disable_vision {
         let vision_config = config.to_vision_manager_config(
             output_path_clone.to_string(),
             vision_metrics.clone(),
@@ -675,10 +675,15 @@ async fn main() -> anyhow::Result<()> {
             vision_handle.clone(),
         ));
 
+        // Get the broadcast trigger sender BEFORE moving the VisionManager into
+        // the spawned task. This sender is passed to start_ui_recording so UI
+        // events (clicks, app switches, clipboard) trigger captures.
+        let trigger_tx = vision_manager.trigger_sender();
+
         let vm_clone = vision_manager.clone();
         let shutdown_tx_clone2 = shutdown_tx_clone.clone();
         let runtime = &tokio::runtime::Handle::current();
-        runtime.spawn(async move {
+        let h = runtime.spawn(async move {
             let mut shutdown_rx = shutdown_tx_clone2.subscribe();
 
             // Start VisionManager
@@ -701,10 +706,11 @@ async fn main() -> anyhow::Result<()> {
             if let Err(e) = vm_clone.shutdown().await {
                 error!("Error shutting down VisionManager: {:?}", e);
             }
-        })
+        });
+        (h, Some(trigger_tx))
     } else {
         // Vision disabled — spawn a no-op task so `handle` always exists
-        tokio::spawn(async {})
+        (tokio::spawn(async {}), None)
     };
 
     let local_data_dir_clone_2 = local_data_dir_clone.clone();
@@ -1012,7 +1018,7 @@ async fn main() -> anyhow::Result<()> {
     let ui_recorder_handle = {
         if ui_recorder_config.enabled {
             info!("starting UI event capture");
-            match start_ui_recording(db.clone(), ui_recorder_config, None).await {
+            match start_ui_recording(db.clone(), ui_recorder_config, capture_trigger_tx).await {
                 Ok(handle) => Some(handle),
                 Err(e) => {
                     error!("failed to start UI event recording: {}", e);

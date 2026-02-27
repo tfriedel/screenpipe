@@ -14,7 +14,8 @@ export type AIProviderType =
 	| "openai"
 	| "custom"
 	| "embedded"
-	| "pi";
+	| "pi"
+	| "claude-agent-sdk";
 
 export type EmbeddedLLMConfig = {
 	enabled: boolean;
@@ -52,6 +53,9 @@ export type AIPreset = {
 	  }
 	| {
 			provider: "pi";
+	  }
+	| {
+			provider: "claude-agent-sdk";
 	  }
 );
 

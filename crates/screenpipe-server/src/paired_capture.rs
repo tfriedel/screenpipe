@@ -82,7 +82,29 @@ pub async fn paired_capture(
         ctx.capture_trigger
     );
 
-    // Extract data from tree snapshot
+    // --- Run OCR to get text positions with bounding boxes (for TextOverlay) ---
+    // Always run OCR regardless of accessibility data so the timeline has
+    // clickable text blocks that users can hover/click to copy.
+    let image_for_ocr = ctx.image.clone();
+    let ocr_result = tokio::task::spawn_blocking(move || {
+        #[cfg(target_os = "macos")]
+        {
+            let (text, json, confidence) =
+                screenpipe_vision::perform_ocr_apple(&image_for_ocr, &[]);
+            (text, json, confidence)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = image_for_ocr;
+            (String::new(), "[]".to_string(), None::<f64>)
+        }
+    })
+    .await
+    .unwrap_or_else(|_| (String::new(), "[]".to_string(), None));
+
+    let (ocr_text, ocr_text_json, _ocr_confidence) = ocr_result;
+
+    // --- Extract data from tree snapshot, fall back to OCR text ---
     #[cfg(feature = "ui-events")]
     let (accessibility_text, tree_json, content_hash, simhash) = match tree_snapshot {
         Some(snap) if !snap.text_content.is_empty() => {
@@ -94,7 +116,14 @@ pub async fn paired_capture(
                 Some(snap.simhash as i64),
             )
         }
-        _ => (None, None, None, None),
+        _ => {
+            // OCR fallback: accessibility returned no text (games, terminals, bad a11y apps).
+            if ocr_text.is_empty() {
+                (None, None, None, None)
+            } else {
+                (Some(ocr_text.clone()), None, None, None)
+            }
+        }
     };
 
     #[cfg(not(feature = "ui-events"))]
@@ -103,23 +132,38 @@ pub async fn paired_capture(
         Option<String>,
         Option<i64>,
         Option<i64>,
-    ) = (None, None, None, None);
+    ) = if ocr_text.is_empty() {
+        (None, None, None, None)
+    } else {
+        (Some(ocr_text.clone()), None, None, None)
+    };
 
-    // Determine text source
+    // Determine text source: "accessibility" when tree nodes were available, "ocr" for fallback
     let (final_text, text_source) = if let Some(ref text) = accessibility_text {
         if text.is_empty() {
             (None, None)
-        } else {
+        } else if tree_json.is_some() {
             (Some(text.as_str()), Some("accessibility"))
+        } else {
+            // Text came from OCR fallback (no tree_json means no accessibility nodes)
+            (Some(text.as_str()), Some("ocr"))
         }
     } else {
         (None, None)
     };
 
-    // Insert snapshot frame into DB
+    // Insert snapshot frame + OCR text positions in a single transaction.
+    // Combining both writes avoids opening two separate transactions per capture,
+    // which halves pool pressure during high-frequency event-driven captures.
+    let ocr_data = if !ocr_text.is_empty() {
+        Some((ocr_text.as_str(), ocr_text_json.as_str(), "AppleNative"))
+    } else {
+        None
+    };
+
     let frame_id = ctx
         .db
-        .insert_snapshot_frame(
+        .insert_snapshot_frame_with_ocr(
             ctx.device_name,
             ctx.captured_at,
             &snapshot_path_str,
@@ -133,6 +177,7 @@ pub async fn paired_capture(
             tree_json.as_deref(),
             content_hash,
             simhash,
+            ocr_data,
         )
         .await?;
 

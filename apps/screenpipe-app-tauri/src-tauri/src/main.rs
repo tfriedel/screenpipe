@@ -61,6 +61,7 @@ mod obsidian_sync;
 mod reminders;
 mod calendar;
 mod pi;
+mod claude_agent;
 mod embedded_server;
 mod suggestions;
 mod voice_training;
@@ -1192,6 +1193,13 @@ async fn main() {
                 pi::pi_prompt,
                 pi::pi_abort,
                 pi::pi_new_session,
+                // Claude Agent SDK commands
+                claude_agent::claude_agent_check,
+                claude_agent::claude_agent_start,
+                claude_agent::claude_agent_stop,
+                claude_agent::claude_agent_prompt,
+                claude_agent::claude_agent_abort,
+                claude_agent::claude_agent_new_session,
                 // Obsidian Sync commands
                 obsidian_sync::obsidian_save_settings,
                 obsidian_sync::obsidian_validate_vault,
@@ -1253,6 +1261,7 @@ async fn main() {
         is_starting: AtomicBool::new(false),
     };
     let pi_state = pi::PiState(Arc::new(tokio::sync::Mutex::new(None)));
+    let claude_agent_state = claude_agent::ClaudeAgentState(Arc::new(tokio::sync::Mutex::new(None)));
     let obsidian_sync_state = obsidian_sync::ObsidianSyncState::new();
     let reminders_state = reminders::RemindersState::new();
     let suggestions_state = suggestions::SuggestionsState::new();
@@ -1323,6 +1332,7 @@ async fn main() {
 
         let app = app.manage(recording_state)
         .manage(pi_state)
+        .manage(claude_agent_state)
         .manage(obsidian_sync_state)
         .manage(reminders_state)
         .manage(suggestions_state)
@@ -1399,6 +1409,13 @@ async fn main() {
             pi::pi_prompt,
             pi::pi_abort,
             pi::pi_new_session,
+            // Claude Agent SDK commands
+            claude_agent::claude_agent_check,
+            claude_agent::claude_agent_start,
+            claude_agent::claude_agent_stop,
+            claude_agent::claude_agent_prompt,
+            claude_agent::claude_agent_abort,
+            claude_agent::claude_agent_new_session,
             // Obsidian Sync commands
             obsidian_sync::obsidian_save_settings,
             obsidian_sync::obsidian_validate_vault,
@@ -1561,6 +1578,9 @@ async fn main() {
 
             // Install Pi coding agent in background (fire-and-forget, never crashes)
             crate::pi::ensure_pi_installed_background();
+
+            // Auto-start Claude Agent bridge if SDK is available (provides HTTP API for pipes)
+            crate::claude_agent::ensure_claude_agent_bridge_running_background(app_handle.clone());
 
             info!("Local data directory: {}", base_dir.display());
 
@@ -2102,6 +2122,14 @@ async fn main() {
             tauri::async_runtime::spawn(async move {
                 if let Some(pi_state) = app_handle_pi.try_state::<pi::PiState>() {
                     pi::cleanup_pi(&pi_state).await;
+                }
+            });
+
+            // Cleanup Claude Agent sidecar
+            let app_handle_claude = app_handle.app_handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Some(claude_state) = app_handle_claude.try_state::<claude_agent::ClaudeAgentState>() {
+                    claude_agent::cleanup_claude_agent(&claude_state).await;
                 }
             });
         }

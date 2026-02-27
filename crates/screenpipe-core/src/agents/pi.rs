@@ -474,10 +474,38 @@ pub fn find_bun_executable() -> Option<String> {
     paths.into_iter().find(|p| std::path::Path::new(p).exists())
 }
 
+/// Find pi executable.
+///
+/// On Windows, prefer the JS entry point (`dist/cli.js`) over the bun-generated
+/// `pi.exe` shim. The shim triggers a libuv `UV_HANDLE_CLOSING` assertion crash
+/// on Windows (known upstream issue in bun/libuv). Running the JS directly via
+/// `bun dist/cli.js` avoids the crash entirely.
 pub fn find_pi_executable() -> Option<String> {
     let home = dirs::home_dir()
         .map(|h| h.to_string_lossy().to_string())
         .unwrap_or_default();
+
+    #[cfg(windows)]
+    {
+        // Prefer the JS entry point to avoid the pi.exe shim libuv crash
+        let js_paths = vec![
+            format!(
+                "{}\\.bun\\install\\global\\node_modules\\@mariozechner\\pi-coding-agent\\dist\\cli.js",
+                home
+            ),
+            format!(
+                "{}\\AppData\\Local\\bun\\install\\global\\node_modules\\@mariozechner\\pi-coding-agent\\dist\\cli.js",
+                home
+            ),
+        ];
+
+        for path in &js_paths {
+            if std::path::Path::new(path).exists() {
+                info!("Found Pi JS entry point (bypassing shim): {}", path);
+                return Some(path.clone());
+            }
+        }
+    }
 
     #[cfg(unix)]
     let paths = vec![

@@ -560,6 +560,7 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
   const piRestartCountRef = useRef(0);
   const piStoppedIntentionallyRef = useRef(false);
   const piThinkingStartRef = useRef<number | null>(null);
+  const activeProviderRef = useRef<string | undefined>(undefined);
 
   // Follow-up suggestions state (TikTok-style)
   const [followUpSuggestions, setFollowUpSuggestions] = useState<string[]>([]);
@@ -718,12 +719,16 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
 
   // Load a specific conversation
   const loadConversation = async (conv: ChatConversation) => {
-    // Abort any ongoing Pi processing before switching
+    // Abort any ongoing processing before switching
     if (isLoading || isStreaming) {
       try {
-        await commands.piAbort();
+        if (isClaudeAgent) {
+          await commands.claudeAgentAbort();
+        } else {
+          await commands.piAbort();
+        }
       } catch (e) {
-        console.warn("[Pi] Failed to abort:", e);
+        console.warn("[Agent] Failed to abort:", e);
       }
       piStreamingTextRef.current = "";
       piMessageIdRef.current = null;
@@ -764,15 +769,23 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
 
   // Start a new conversation
   const startNewConversation = async () => {
-    // Abort any ongoing Pi processing and start a fresh session
+    // Abort any ongoing processing and start a fresh session
     if (piInfo?.running) {
       try {
         if (isLoading || isStreaming) {
-          await commands.piAbort();
+          if (isClaudeAgent) {
+            await commands.claudeAgentAbort();
+          } else {
+            await commands.piAbort();
+          }
         }
-        await commands.piNewSession();
+        if (isClaudeAgent) {
+          await commands.claudeAgentNewSession();
+        } else {
+          await commands.piNewSession();
+        }
       } catch (e) {
-        console.warn("[Pi] Failed to reset session:", e);
+        console.warn("[Agent] Failed to reset session:", e);
       }
       piStreamingTextRef.current = "";
       piMessageIdRef.current = null;
@@ -925,9 +938,13 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
         (async () => {
           if (piInfo?.running) {
             try {
-              await commands.piNewSession();
+              if (isClaudeAgent) {
+                await commands.claudeAgentNewSession();
+              } else {
+                await commands.piNewSession();
+              }
             } catch (e) {
-              console.warn("[Pi] Failed to reset session:", e);
+              console.warn("[Agent] Failed to reset session:", e);
             }
           }
           setMessages([]);
@@ -1168,6 +1185,8 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
   const isPi = true;
   const hasValidModel = activePreset?.model && activePreset.model.trim() !== "";
   const needsLogin = (activePreset?.provider === "screenpipe-cloud" || activePreset?.provider === "pi") && !settings.user?.token;
+  const isClaudeAgent = activePreset?.provider === "claude-agent-sdk";
+  activeProviderRef.current = activePreset?.provider;
   const piReady = piInfo?.running ?? false;
   const canChat = hasPresets && hasValidModel && !needsLogin && piReady;
 
@@ -1216,20 +1235,19 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePreset?.provider, activePreset?.url, activePreset?.model, activePreset?.apiKey]);
 
-  // Check Pi status on mount — Pi is auto-started at app boot by Rust
+  // Check Pi/Claude Agent status on mount
   useEffect(() => {
-    const checkPi = async () => {
+    const checkStatus = async () => {
       try {
         const result = await commands.piInfo();
         if (result.status === "ok") {
           setPiInfo(result.data);
         }
       } catch (e) {
-        console.warn("[Pi] Failed to check status:", e);
+        console.warn("[Agent] Failed to check status:", e);
       }
     };
-    checkPi();
-    // Keep polling Pi status — recovers from stale termination events and transient failures
+    checkStatus();
     const interval = setInterval(async () => {
       try {
         const result = await commands.piInfo();
@@ -1283,17 +1301,31 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
       } catch {
         dir = "/tmp/.screenpipe/pi-chat";
       }
-      console.log("[Pi] Restarting with new preset:", providerConfig?.provider, providerConfig?.model);
+      console.log("[Agent] Restarting with new preset:", providerConfig?.provider, providerConfig?.model);
       try {
-        const result = await commands.piStart(dir, settings.user?.token ?? null, providerConfig);
-        if (result.status === "ok") {
-          setPiInfo(result.data);
+        if (activePreset?.provider === "claude-agent-sdk") {
+          // Stop Pi if it was running from a previous preset
+          try { await commands.piStop(); } catch {}
+          const result = await commands.claudeAgentStart();
+          if (result.status === "ok") {
+            setPiInfo({ running: result.data.running, projectDir: null, pid: result.data.pid ?? null });
+          } else {
+            console.error("[ClaudeAgent] Restart failed:", result.error);
+            toast({ title: "Failed to start Claude Agent", description: result.error, variant: "destructive" });
+          }
         } else {
-          console.error("[Pi] Restart failed:", result.error);
-          toast({ title: "Failed to restart Pi", description: result.error, variant: "destructive" });
+          // Stop Claude Agent if it was running from a previous preset
+          try { await commands.claudeAgentStop(); } catch {}
+          const result = await commands.piStart(dir, settings.user?.token ?? null, providerConfig);
+          if (result.status === "ok") {
+            setPiInfo(result.data);
+          } else {
+            console.error("[Pi] Restart failed:", result.error);
+            toast({ title: "Failed to restart Pi", description: result.error, variant: "destructive" });
+          }
         }
       } catch (e) {
-        console.error("[Pi] Restart exception:", e);
+        console.error("[Agent] Restart exception:", e);
       } finally {
         piStartInFlightRef.current = false;
         setPiStarting(false);
@@ -1687,23 +1719,34 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
             }
           } catch {}
 
-          // Pi is actually dead — auto-restart (up to 5 attempts)
+          // Agent is actually dead — auto-restart (up to 5 attempts)
           if (piRestartCountRef.current <= 5 && !piStartInFlightRef.current) {
-            console.log("[Pi] Auto-restarting (attempt", piRestartCountRef.current, "/ 5)");
+            console.log("[Agent] Auto-restarting (attempt", piRestartCountRef.current, "/ 5)");
             try {
-              const providerConfig = buildProviderConfig();
-              const home = await homeDir();
-              const dir = await join(home, ".screenpipe", "pi-chat");
-              const result = await commands.piStart(dir, settings.user?.token ?? null, providerConfig);
-              if (result.status === "ok") {
-                setPiInfo(result.data);
-                if (result.data.running) piRestartCountRef.current = 0;
+              if (activeProviderRef.current === "claude-agent-sdk") {
+                const result = await commands.claudeAgentStart();
+                if (result.status === "ok") {
+                  setPiInfo({ running: result.data.running, projectDir: null, pid: result.data.pid ?? null });
+                  if (result.data.running) piRestartCountRef.current = 0;
+                } else {
+                  console.error("[ClaudeAgent] Auto-restart failed:", result.error);
+                  setPiInfo(null);
+                }
               } else {
-                console.error("[Pi] Auto-restart failed:", result.error);
-                setPiInfo(null);
+                const providerConfig = buildProviderConfig();
+                const home = await homeDir();
+                const dir = await join(home, ".screenpipe", "pi-chat");
+                const result = await commands.piStart(dir, settings.user?.token ?? null, providerConfig);
+                if (result.status === "ok") {
+                  setPiInfo(result.data);
+                  if (result.data.running) piRestartCountRef.current = 0;
+                } else {
+                  console.error("[Pi] Auto-restart failed:", result.error);
+                  setPiInfo(null);
+                }
               }
             } catch (e) {
-              console.error("[Pi] Auto-restart exception:", e);
+              console.error("[Agent] Auto-restart exception:", e);
               setPiInfo(null);
             }
           } else {
@@ -1925,10 +1968,15 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
         { id: assistantMessageId, role: "assistant", content: "Processing...", timestamp: Date.now() },
       ]);
 
-      const result = await commands.piPrompt(
-        userMessage,
-        piImages.length > 0 ? piImages : null,
-      );
+      let result;
+      if (isClaudeAgent) {
+        result = await commands.claudeAgentPrompt(userMessage, activePreset?.model ?? null);
+      } else {
+        result = await commands.piPrompt(
+          userMessage,
+          piImages.length > 0 ? piImages : null,
+        );
+      }
 
       if (result.status === "error") {
         clearTimeout(timeoutId);
@@ -2085,9 +2133,13 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
 
   const handleStop = async () => {
     try {
-      await commands.piAbort();
+      if (isClaudeAgent) {
+        await commands.claudeAgentAbort();
+      } else {
+        await commands.piAbort();
+      }
     } catch (e) {
-      console.warn("[Pi] Failed to abort:", e);
+      console.warn("[Agent] Failed to abort:", e);
     }
     piStreamingTextRef.current = "";
     piMessageIdRef.current = null;

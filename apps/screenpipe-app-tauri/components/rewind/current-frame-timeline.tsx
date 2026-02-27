@@ -32,21 +32,6 @@ interface CurrentFrameTimelineProps {
 	allDeviceIds?: string[];
 }
 
-/**
- * Parse a device_id like "monitor_4" → "4" or "louis-macbook/monitor_1" → "macbook · 1"
- */
-function formatDeviceLabel(deviceId: string): string {
-	// cloud sync format: "hostname/monitor_N"
-	if (deviceId.includes("/")) {
-		const [host, monitor] = deviceId.split("/");
-		const shortHost = host.replace(/^[^-]*-/, ""); // "louis-macbook" → "macbook"
-		const num = monitor.replace(/\D/g, "");
-		return `${shortHost} · ${num}`;
-	}
-	// local format: "monitor_N"
-	const num = deviceId.replace(/\D/g, "");
-	return num || deviceId;
-}
 
 export const SkeletonLoader: FC = () => {
 	return (
@@ -145,12 +130,6 @@ export const CurrentFrameTimeline: FC<CurrentFrameTimelineProps> = ({
 	const offsetIndex = device?.offset_index ?? 0;
 	const fpsFromServer = device?.fps ?? 0.5;
 
-	// monitor pill — only show when session has multiple monitors
-	const deviceId = device?.device_id;
-	const showMonitorPill = Boolean(
-		deviceId && allDeviceIds && allDeviceIds.length > 1
-	);
-	const monitorLabel = deviceId ? formatDeviceLabel(deviceId) : "";
 
 	// Track skipped frames for analytics
 	useEffect(() => {
@@ -777,12 +756,6 @@ export const CurrentFrameTimeline: FC<CurrentFrameTimelineProps> = ({
 				/>
 			)}
 
-			{/* monitor indicator pill */}
-			{showMonitorPill && !isLoading && !hasError && (
-				<div className="absolute top-2 right-2 z-20 px-1.5 py-0.5 text-[10px] font-mono bg-black/60 text-white/70 rounded-sm select-none pointer-events-none">
-					{monitorLabel}
-				</div>
-			)}
 
 			{/* OCR text overlay — clickable text + URLs for frames with OCR data */}
 			{!isLoading && !hasError && !ocrLoading && naturalDimensions && renderedImageInfo && textPositions.length > 0 && (
@@ -806,18 +779,6 @@ export const CurrentFrameTimeline: FC<CurrentFrameTimelineProps> = ({
 				</div>
 			)}
 
-			{/* Copy text button — top-right, when no OCR TextOverlay is showing */}
-			{!isLoading && !hasError && frameContext?.text && textPositions.length === 0 && (
-				<button
-					type="button"
-					onClick={copyFrameText}
-					className="absolute top-2 right-2 z-20 p-1.5 bg-black/60 hover:bg-black/80 text-white/80 hover:text-white rounded-sm transition-colors"
-					style={{ ...(showMonitorPill ? { right: "4.5rem" } : {}) }}
-					title="Copy all text"
-				>
-					<Copy className="w-3.5 h-3.5" />
-				</button>
-			)}
 
 			{/* URL chips — bottom of frame, when no OCR TextOverlay is showing */}
 			{!isLoading && !hasError && textPositions.length === 0 && detectedUrls.length > 0 && (

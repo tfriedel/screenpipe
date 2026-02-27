@@ -154,9 +154,12 @@ pub async fn health_check(State(state): State<Arc<AppState>>) -> JsonResponse<He
     let vision_snap = state.vision_metrics.snapshot();
     let audio_snap = state.audio_metrics.snapshot();
 
-    let last_frame_ts = vision_snap.last_db_write_ts;
-    let last_frame = if last_frame_ts > 0 {
-        Utc.timestamp_opt(last_frame_ts as i64, 0).single()
+    // Use the most recent of DB write or capture attempt for "is alive" check.
+    // The capture loop records a heartbeat before each capture attempt, so even
+    // if DB writes time out, health still reports "ok" while the loop is running.
+    let last_frame_ts = vision_snap.last_db_write_ts.max(vision_snap.last_capture_attempt_ts);
+    let last_frame = if vision_snap.last_db_write_ts > 0 {
+        Utc.timestamp_opt(vision_snap.last_db_write_ts as i64, 0).single()
     } else {
         None
     };

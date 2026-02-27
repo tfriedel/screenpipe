@@ -56,6 +56,9 @@ pub struct PipelineMetrics {
     // --- Timestamps ---
     /// Unix timestamp (secs) of most recent DB write — used by health check to avoid DB queries
     pub last_db_write_ts: AtomicU64,
+    /// Unix timestamp (secs) of most recent capture attempt — heartbeat proving the loop is alive
+    /// even when DB writes time out or are slow.
+    pub last_capture_attempt_ts: AtomicU64,
 }
 
 impl PipelineMetrics {
@@ -77,12 +80,23 @@ impl PipelineMetrics {
             video_queue_depth: AtomicU64::new(0),
             pipeline_stall_count: AtomicU64::new(0),
             last_db_write_ts: AtomicU64::new(0),
+            last_capture_attempt_ts: AtomicU64::new(0),
         }
     }
 
     /// Record that a frame was captured and sent to queues.
     pub fn record_capture(&self) {
         self.frames_captured.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a capture attempt heartbeat — proves the capture loop is alive
+    /// even when the DB write that follows might time out.
+    pub fn record_capture_attempt(&self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        self.last_capture_attempt_ts.store(now, Ordering::Relaxed);
     }
 
     /// Record that a frame was skipped by similarity check.
@@ -197,6 +211,7 @@ impl PipelineMetrics {
             video_queue_depth: self.video_queue_depth.load(Ordering::Relaxed),
             pipeline_stall_count: self.pipeline_stall_count.load(Ordering::Relaxed),
             last_db_write_ts: self.last_db_write_ts.load(Ordering::Relaxed),
+            last_capture_attempt_ts: self.last_capture_attempt_ts.load(Ordering::Relaxed),
         }
     }
 }
@@ -231,4 +246,6 @@ pub struct MetricsSnapshot {
     pub pipeline_stall_count: u64,
     /// Unix timestamp (secs) of most recent DB write (0 = none yet)
     pub last_db_write_ts: u64,
+    /// Unix timestamp (secs) of most recent capture attempt (0 = none yet)
+    pub last_capture_attempt_ts: u64,
 }

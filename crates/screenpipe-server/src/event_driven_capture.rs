@@ -19,7 +19,7 @@ use screenpipe_vision::utils::capture_monitor_image;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
 #[cfg(feature = "ui-events")]
@@ -184,14 +184,15 @@ impl EventDrivenCapture {
 
 /// Channel-based trigger sender for external event sources (UI events).
 ///
-/// UI event handlers (app switch, window focus, click, clipboard) send
-/// triggers through this channel. The main capture loop receives and processes them.
-pub type TriggerSender = mpsc::UnboundedSender<CaptureTrigger>;
-pub type TriggerReceiver = mpsc::UnboundedReceiver<CaptureTrigger>;
+/// Uses `broadcast` so multiple receivers (one per monitor) can subscribe
+/// to a single sender shared with the UI recorder.
+pub type TriggerSender = broadcast::Sender<CaptureTrigger>;
+pub type TriggerReceiver = broadcast::Receiver<CaptureTrigger>;
 
 /// Create a trigger channel pair.
 pub fn trigger_channel() -> (TriggerSender, TriggerReceiver) {
-    mpsc::unbounded_channel()
+    let (tx, rx) = broadcast::channel(64);
+    (tx, rx)
 }
 
 /// Main event-driven capture loop for a single monitor.
@@ -284,12 +285,17 @@ pub async fn event_driven_capture_loop(
         // Check for external triggers (non-blocking)
         let mut trigger = match trigger_rx.try_recv() {
             Ok(trigger) => Some(trigger),
-            Err(mpsc::error::TryRecvError::Empty) => {
+            Err(broadcast::error::TryRecvError::Empty) => {
                 // Poll activity feed for state transitions
                 state.poll_activity(&activity_feed)
             }
-            Err(mpsc::error::TryRecvError::Disconnected) => {
-                warn!("trigger channel disconnected for monitor {}", monitor_id);
+            Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                debug!("trigger channel lagged by {} messages on monitor {}", n, monitor_id);
+                // Drain missed triggers, just capture now
+                Some(CaptureTrigger::Manual)
+            }
+            Err(broadcast::error::TryRecvError::Closed) => {
+                warn!("trigger channel closed for monitor {}", monitor_id);
                 break;
             }
         };
@@ -322,18 +328,28 @@ pub async fn event_driven_capture_loop(
 
         if let Some(trigger) = trigger {
             if state.can_capture() {
-                match do_capture(
-                    &db,
-                    &monitor,
-                    monitor_id,
-                    &device_name,
-                    &snapshot_writer,
-                    &tree_walker_config,
-                    &trigger,
+                // Heartbeat: record that the loop is alive and attempting a capture.
+                // This keeps health "ok" even if the DB write below times out.
+                vision_metrics.record_capture_attempt();
+
+                // Timeout prevents the capture loop from blocking indefinitely
+                // when the DB pool is saturated (e.g., FTS backfill + streaming).
+                let capture_result = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    do_capture(
+                        &db,
+                        &monitor,
+                        monitor_id,
+                        &device_name,
+                        &snapshot_writer,
+                        &tree_walker_config,
+                        &trigger,
+                    ),
                 )
-                .await
-                {
-                    Ok(result) => {
+                .await;
+
+                match capture_result {
+                    Ok(Ok(result)) => {
                         state.mark_captured();
 
                         // Feed the captured frame to comparer so we don't
@@ -358,12 +374,19 @@ pub async fn event_driven_capture_loop(
                             result.duration_ms
                         );
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         error!(
                             "event capture failed (trigger={}, monitor={}): {}",
                             trigger.as_str(),
                             monitor_id,
                             e
+                        );
+                    }
+                    Err(_timeout) => {
+                        warn!(
+                            "event capture timed out (trigger={}, monitor={}) — DB pool may be saturated",
+                            trigger.as_str(),
+                            monitor_id
                         );
                     }
                 }
@@ -520,6 +543,17 @@ mod tests {
             CaptureTrigger::AppSwitch { app_name } => assert_eq!(app_name, "Code"),
             _ => panic!("expected AppSwitch"),
         }
+    }
+
+    #[test]
+    fn test_broadcast_multiple_receivers() {
+        let (tx, mut rx1) = trigger_channel();
+        let mut rx2 = tx.subscribe();
+
+        tx.send(CaptureTrigger::Click).unwrap();
+
+        assert_eq!(rx1.try_recv().unwrap(), CaptureTrigger::Click);
+        assert_eq!(rx2.try_recv().unwrap(), CaptureTrigger::Click);
     }
 
     #[test]

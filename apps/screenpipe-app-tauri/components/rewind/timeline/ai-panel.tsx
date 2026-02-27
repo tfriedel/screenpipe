@@ -39,6 +39,7 @@ const providerIcons: Record<AIPreset["provider"], JSX.Element> = {
 	custom: <Image src="/images/custom.png" alt="Custom" width={16} height={16} />,
 	"screenpipe-cloud": <Image src="/images/screenpipe.png" alt="Screenpipe Cloud" width={16} height={16} />,
 	pi: <Image src="/images/screenpipe.png" alt="Pi" width={16} height={16} />,
+	"claude-agent-sdk": <Image src="/images/custom.png" alt="Claude Agent" width={16} height={16} />,
 };
 
 const getPresetProviderIcon = (provider: AIPreset["provider"]) => {
@@ -210,9 +211,15 @@ export function AIPanel({
 	};
 
 	const handleClose = async () => {
-		// Abort any ongoing Pi request
+		// Abort any ongoing request
 		if (piStreamingRef.current) {
-			try { await commands.piAbort(); } catch {}
+			try {
+				if (activePreset?.provider === "claude-agent-sdk") {
+					await commands.claudeAgentAbort();
+				} else {
+					await commands.piAbort();
+				}
+			} catch {}
 			piStreamingRef.current = false;
 		}
 		if (abortControllerRef.current) {
@@ -309,9 +316,13 @@ export function AIPanel({
 
 	const handleStopStreaming = async () => {
 		try {
-			await commands.piAbort();
+			if (activePreset?.provider === "claude-agent-sdk") {
+				await commands.claudeAgentAbort();
+			} else {
+				await commands.piAbort();
+			}
 		} catch (e) {
-			console.warn("Failed to abort Pi:", e);
+			console.warn("Failed to abort agent:", e);
 		}
 		piStreamingRef.current = false;
 		setIsStreaming(false);
@@ -416,7 +427,12 @@ Please analyze the data in context of this question.`;
 				{ id: generateId(), role: "assistant", content: "Processing..." },
 			]);
 
-			const result = await commands.piPrompt(prompt, null);
+			let result;
+			if (activePreset?.provider === "claude-agent-sdk") {
+				result = await commands.claudeAgentPrompt(prompt, activePreset?.model ?? null);
+			} else {
+				result = await commands.piPrompt(prompt, null);
+			}
 			if (result.status === "error") {
 				piStreamingRef.current = false;
 				setChatMessages((prev) => [
